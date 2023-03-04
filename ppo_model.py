@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.optim.optimizer import Optimizer
 
 try:
-    import gym
+    import gymnasium as gym
 except ModuleNotFoundError:
     _GYM_AVAILABLE = False
 else:
@@ -34,6 +34,7 @@ class PPO(pl.LightningModule):
         https://github.com/PyTorchLightning/pytorch-lightning-bolts/blob/master/pl_bolts/models/rl/reinforce_model.py
 
     """
+
     def __init__(
         self,
         env: str,
@@ -64,7 +65,9 @@ class PPO(pl.LightningModule):
         super().__init__()
 
         if not _GYM_AVAILABLE:
-            raise ModuleNotFoundError('This Module requires gym environment which is not installed yet.')
+            raise ModuleNotFoundError(
+                "This Module requires gym environment which is not installed yet."
+            )
 
         # Hyperparameters
         self.lr_actor = lr_actor
@@ -87,11 +90,16 @@ class PPO(pl.LightningModule):
             actor_mlp = create_mlp(self.env.observation_space.shape, act_dim)
             self.actor = ActorContinous(actor_mlp, act_dim)
         elif isinstance(self.env.action_space, gym.spaces.discrete.Discrete):
-            actor_mlp = create_mlp(self.env.observation_space.shape, self.env.action_space.n)
+            actor_mlp = create_mlp(
+                self.env.observation_space.shape, self.env.action_space.n
+            )
             self.actor = ActorCategorical(actor_mlp)
         else:
-            raise NotImplementedError('Env action space should be of type Box (continous) or Discrete (categorical)'
-                                      'Got type: ', type(self.env.action_space))
+            raise NotImplementedError(
+                "Env action space should be of type Box (continous) or Discrete (categorical)"
+                "Got type: ",
+                type(self.env.action_space),
+            )
         self.agent = ActorCriticAgent(self.actor, self.critic)
 
         self.batch_states = []
@@ -109,9 +117,11 @@ class PPO(pl.LightningModule):
         self.avg_ep_len = 0
         self.avg_reward = 0
 
-        self.state = torch.FloatTensor(self.env.reset())
+        self.state = torch.FloatTensor(self.env.reset()[0])
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Passes in a state x through the network and returns the policy and a sampled action
         Args:
@@ -142,7 +152,9 @@ class PPO(pl.LightningModule):
 
         return list(reversed(cumul_reward))
 
-    def calc_advantage(self, rewards: List[float], values: List[float], last_value: float) -> List[float]:
+    def calc_advantage(
+        self, rewards: List[float], values: List[float], last_value: float
+    ) -> List[float]:
         """Calculate the advantage given rewards, state values, and the last value of episode
         Args:
             rewards: list of episode rewards
@@ -154,13 +166,15 @@ class PPO(pl.LightningModule):
         rews = rewards + [last_value]
         vals = values + [last_value]
         # GAE
-        delta = [rews[i] + self.gamma * vals[i + 1] - vals[i] for i in range(len(rews) - 1)]
+        delta = [
+            rews[i] + self.gamma * vals[i + 1] - vals[i] for i in range(len(rews) - 1)
+        ]
         adv = self.discount_rewards(delta, self.gamma * self.lam)
 
         return adv
 
     def train_batch(
-            self,
+        self,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
         """
         Contains the logic for generating trajectory data to train policy and value network
@@ -170,7 +184,7 @@ class PPO(pl.LightningModule):
 
         for step in range(self.steps_per_epoch):
             pi, action, log_prob, value = self.agent(self.state, self.device)
-            next_state, reward, done, _ = self.env.step(action.cpu().numpy())
+            next_state, reward, done, _, _ = self.env.step(action.cpu().numpy())
 
             self.episode_step += 1
 
@@ -198,21 +212,29 @@ class PPO(pl.LightningModule):
                     steps_before_cutoff = 0
 
                 # discounted cumulative reward
-                self.batch_qvals += self.discount_rewards(self.ep_rewards + [last_value], self.gamma)[:-1]
+                self.batch_qvals += self.discount_rewards(
+                    self.ep_rewards + [last_value], self.gamma
+                )[:-1]
                 # advantage
-                self.batch_adv += self.calc_advantage(self.ep_rewards, self.ep_values, last_value)
+                self.batch_adv += self.calc_advantage(
+                    self.ep_rewards, self.ep_values, last_value
+                )
                 # logs
                 self.epoch_rewards.append(sum(self.ep_rewards))
                 # reset params
                 self.ep_rewards = []
                 self.ep_values = []
                 self.episode_step = 0
-                self.state = torch.FloatTensor(self.env.reset())
+                self.state = torch.FloatTensor(self.env.reset()[0])
 
             if epoch_end:
                 train_data = zip(
-                    self.batch_states, self.batch_actions, self.batch_logp,
-                    self.batch_qvals, self.batch_adv)
+                    self.batch_states,
+                    self.batch_actions,
+                    self.batch_logp,
+                    self.batch_qvals,
+                    self.batch_adv,
+                )
 
                 for state, action, logp_old, qval, adv in train_data:
                     yield state, action, logp_old, qval, adv
@@ -235,7 +257,9 @@ class PPO(pl.LightningModule):
                 nb_episodes = len(epoch_rewards)
 
                 self.avg_ep_reward = total_epoch_reward / nb_episodes
-                self.avg_ep_len = (self.steps_per_epoch - steps_before_cutoff) / nb_episodes
+                self.avg_ep_len = (
+                    self.steps_per_epoch - steps_before_cutoff
+                ) / nb_episodes
 
                 self.epoch_rewards.clear()
 
@@ -252,7 +276,9 @@ class PPO(pl.LightningModule):
         loss_critic = (qval - value).pow(2).mean()
         return loss_critic
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx, optimizer_idx):
+    def training_step(
+        self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx, optimizer_idx
+    ):
         """
         Carries out a single update to actor and critic network from a batch of replay buffer.
 
@@ -266,26 +292,50 @@ class PPO(pl.LightningModule):
         state, action, old_logp, qval, adv = batch
 
         # normalize advantages
-        adv = (adv - adv.mean())/adv.std()
+        adv = (adv - adv.mean()) / adv.std()
 
-        self.log("avg_ep_len", self.avg_ep_len, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("avg_ep_reward", self.avg_ep_reward, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("avg_reward", self.avg_reward, prog_bar=True, on_step=False, on_epoch=True)
+        self.log(
+            "avg_ep_len", self.avg_ep_len, prog_bar=True, on_step=False, on_epoch=True
+        )
+        self.log(
+            "avg_ep_reward",
+            self.avg_ep_reward,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+        )
+        self.log(
+            "avg_reward", self.avg_reward, prog_bar=True, on_step=False, on_epoch=True
+        )
 
         if optimizer_idx == 0:
             loss_actor = self.actor_loss(state, action, old_logp, qval, adv)
-            self.log('loss_actor', loss_actor, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log(
+                "loss_actor",
+                loss_actor,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
 
             return loss_actor
 
         elif optimizer_idx == 1:
             loss_critic = self.critic_loss(state, action, old_logp, qval, adv)
-            self.log('loss_critic', loss_critic, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            self.log(
+                "loss_critic",
+                loss_critic,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
 
             return loss_critic
 
     def configure_optimizers(self) -> List[Optimizer]:
-        """ Initialize Adam optimizer"""
+        """Initialize Adam optimizer"""
         optimizer_actor = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
         optimizer_critic = optim.Adam(self.critic.parameters(), lr=self.lr_critic)
 
@@ -308,3 +358,15 @@ class PPO(pl.LightningModule):
     def train_dataloader(self) -> DataLoader:
         """Get train loader"""
         return self._dataloader()
+
+
+if __name__ == "__main__":
+    import networks
+    import data
+    from pytorch_lightning import Trainer
+
+    model = PPO("CartPole-v0")
+    # pl trainer
+    trainer = Trainer(max_epochs=3)
+    # fit
+    res = trainer.fit(model)
