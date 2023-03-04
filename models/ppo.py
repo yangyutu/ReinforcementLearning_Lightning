@@ -2,7 +2,7 @@ from typing import List, Tuple
 
 import pytorch_lightning as pl
 from networks import create_mlp, ActorCriticAgent, ActorCategorical, ActorContinous
-from data import ExperienceSourceDataset
+from data_utils.data import ExperienceSourceDataset
 
 import torch
 from torch.utils.data import DataLoader
@@ -115,7 +115,7 @@ class PPO(pl.LightningModule):
         self.episode_step = 0
         self.avg_ep_reward = 0
         self.avg_ep_len = 0
-        self.avg_reward = 0
+        self.avg_step_reward = 0
 
         self.state = torch.FloatTensor(self.env.reset()[0])
 
@@ -183,6 +183,7 @@ class PPO(pl.LightningModule):
         """
 
         for step in range(self.steps_per_epoch):
+            # the agent produce the action distribution (array), a sampled action to take, log probability, and predicted state value under current policy
             pi, action, log_prob, value = self.agent(self.state, self.device)
             next_state, reward, done, _, _ = self.env.step(action.cpu().numpy())
 
@@ -235,7 +236,7 @@ class PPO(pl.LightningModule):
                     self.batch_qvals,
                     self.batch_adv,
                 )
-
+                # after finish one epoch, we yield the data here
                 for state, action, logp_old, qval, adv in train_data:
                     yield state, action, logp_old, qval, adv
 
@@ -246,7 +247,7 @@ class PPO(pl.LightningModule):
                 self.batch_qvals.clear()
 
                 # logging
-                self.avg_reward = sum(self.epoch_rewards) / self.steps_per_epoch
+                self.avg_step_reward = sum(self.epoch_rewards) / self.steps_per_epoch
 
                 # if epoch ended abruptly, exlude last cut-short episode to prevent stats skewness
                 epoch_rewards = self.epoch_rewards
@@ -268,10 +269,13 @@ class PPO(pl.LightningModule):
         logp = self.actor.get_log_prob(pi, action)
         ratio = torch.exp(logp - logp_old)
         clip_adv = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * adv
+        # we want to maximize clip_adv, which is equivalent to minimize the negative advantage
         loss_actor = -(torch.min(ratio * adv, clip_adv)).mean()
         return loss_actor
 
     def critic_loss(self, state, action, logp_old, qval, adv) -> torch.Tensor:
+        # https://spinningup.openai.com/en/latest/algorithms/ppo.html
+        # minimize the value prediction and the reward-to-go qval
         value = self.critic(state)
         loss_critic = (qval - value).pow(2).mean()
         return loss_critic
@@ -289,6 +293,11 @@ class PPO(pl.LightningModule):
         Returns:
             loss
         """
+        # state: a 2d tensor [batch_size, state_dim]
+        # action: a 1d integer array for discrete action space
+        # old_logp: a 1d double array for the log probability of choosing the action
+        # qval: a 1d double array for the Q(s, a) for (s_1, a_1),...(s_N, a_N)
+        # adv: a 1d double array for the A(s, a) for (s_1, a_1),...(s_N, a_N)
         state, action, old_logp, qval, adv = batch
 
         # normalize advantages
@@ -305,7 +314,11 @@ class PPO(pl.LightningModule):
             on_epoch=True,
         )
         self.log(
-            "avg_reward", self.avg_reward, prog_bar=True, on_step=False, on_epoch=True
+            "avg_step_reward",
+            self.avg_step_reward,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
         )
 
         if optimizer_idx == 0:
@@ -362,11 +375,21 @@ class PPO(pl.LightningModule):
 
 if __name__ == "__main__":
     import networks
-    import data
+    import data_utils.data as data
     from pytorch_lightning import Trainer
+    from pytorch_lightning.loggers.wandb import WandbLogger
 
-    model = PPO("CartPole-v0")
+    project_name = "lightning_RL"
+    env_name = "CartPole-v0"
+    wandb_logger = WandbLogger(
+        project=project_name,  # group runs in "MNIST" project
+        log_model=False,
+        save_dir="experiments",
+        tags=[env_name, "PPO"],
+    )
+
+    model = PPO(env_name)
     # pl trainer
-    trainer = Trainer(max_epochs=3)
+    trainer = Trainer(max_epochs=10, accelerator="auto", gpus=1, logger=wandb_logger)
     # fit
     res = trainer.fit(model)
