@@ -1,7 +1,12 @@
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import pytorch_lightning as pl
-from networks import create_mlp, ActorCriticAgent, ActorCategorical, ActorContinous
+from models.networks import (
+    create_mlp,
+    ActorCriticAgent,
+    ActorCategorical,
+    ActorContinous,
+)
 from data_utils.data import ExperienceSourceDataset
 
 import torch
@@ -37,7 +42,7 @@ class PPO(pl.LightningModule):
 
     def __init__(
         self,
-        env: str,
+        env: Union[str, gym.Env],
         gamma: float = 0.99,
         lam: float = 0.95,
         lr_actor: float = 3e-4,
@@ -81,7 +86,10 @@ class PPO(pl.LightningModule):
         self.clip_ratio = clip_ratio
         self.save_hyperparameters()
 
-        self.env = gym.make(env)
+        if isinstance(env, str):
+            self.env = gym.make(env)
+        else:
+            self.env = env
         # value network
         self.critic = create_mlp(self.env.observation_space.shape, 1)
         # policy network (agent)
