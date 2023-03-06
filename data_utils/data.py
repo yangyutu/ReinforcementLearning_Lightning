@@ -18,3 +18,12 @@ class ExperienceSourceDataset(IterableDataset):
     def __iter__(self) -> Iterable:
         iterator = self.generate_batch()
         return iterator
+
+
+class LMDataLoader:
+    def __init__(self, generate_batch: Callable):
+        self.generate_batch = generate_batch
+
+    def __iter__(self):
+        iterator = self.generate_batch()
+        return iterator
