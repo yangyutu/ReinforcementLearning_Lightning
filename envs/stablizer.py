@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 
 
 class StablizerOneD(gym.Env[np.ndarray, Union[int, np.ndarray]]):
-    def __init__(self, config=None, noise_level=0.05, seed=1):
+    def __init__(self, config=None, noise_level=0.05, seed=1, end_step=100):
         super(StablizerOneD, self).__init__()
 
         self.config = config
@@ -18,7 +18,7 @@ class StablizerOneD(gym.Env[np.ndarray, Union[int, np.ndarray]]):
         self.nbActions = 3
         self.stateDim = 1
         self.noise_level = noise_level
-        self.endStep = 100
+        self.endStep = end_step
         self.randomSeed = seed
 
         # import parameter for vector env

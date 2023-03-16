@@ -1,9 +1,10 @@
-from typing import Union, Tuple
+from typing import Union, Tuple, List
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.distributions import Categorical, Normal
-
+import numpy as np
 
 def create_mlp(input_shape: Tuple[int], n_actions: int, hidden_sizes: list = [128, 128]):
     """
@@ -140,3 +141,71 @@ class ActorCriticAgent(object):
             log probability of the acition under pi
         """
         return self.actor_net.get_log_prob(pi, actions)
+    
+
+class ActorAgent(object):
+
+    def __init__(self, actor_net: nn.Module):
+        self.actor_net = actor_net
+        
+    @torch.no_grad()
+    def __call__(self, state: torch.Tensor, device: str) -> List[int]:
+        """
+        Takes in the current state and returns the agents policy, sampled
+        action, log probability of the action, and value of the given state
+        Args:
+            states: current state of the environment
+            device: the device used for the current batch
+        Returns:
+            torch dsitribution and randomly sampled action
+        """
+
+        state = state.to(device=device)
+
+        pi, actions = self.actor_net(state)
+        log_p = self.get_log_prob(pi, actions)
+
+        return pi, actions, log_p
+
+    def get_log_prob(self,
+                     pi: Union[Categorical, Normal],
+                     actions: torch.Tensor) -> torch.Tensor:
+        """
+        Takes in the current state and returns the agents policy, a sampled
+        action, log probability of the action, and the value of the state
+        Args:
+            pi: torch distribution
+            actions: actions taken by distribution
+        Returns:
+            log probability of the acition under pi
+        """
+        return self.actor_net.get_log_prob(pi, actions)
+
+    
+class PolicyAgent(object):
+    """Policy based agent that returns an action based on the networks policy."""
+    def __init__(self, net: nn.Module):
+        self.net = net
+        
+    @torch.no_grad()
+    def __call__(self, states: torch.Tensor, device: str) -> List[int]:
+        """Takes in the current state and returns the action based on the agents policy.
+        Args:
+            states: current state of the environment
+            device: the device used for the current batch
+        Returns:
+            action defined by policy
+        """
+        if not isinstance(states, list):
+            states = [states]
+
+        states = torch.tensor(states, device=device)
+
+        # get the logits and pass through softmax for probability distribution
+        probabilities = F.softmax(self.net(states)).squeeze(dim=-1)
+        prob_np = probabilities.data.cpu().numpy()
+
+        # take the numpy values and randomly select action based on prob distribution
+        actions = [np.random.choice(len(prob), p=prob) for prob in prob_np]
+
+        return actions

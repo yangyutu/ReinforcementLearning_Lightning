@@ -3,29 +3,26 @@ from collections import OrderedDict
 from typing import List, Tuple
 
 import numpy as np
+import pytorch_lightning as pl
 from pytorch_lightning import LightningModule, Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch import Tensor, optim
 from torch.nn.functional import log_softmax
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
+from models.networks import ActorCategorical, create_mlp, ActorAgent
+from data_utils.data import ExperienceSourceDataset
+import torch
 
-from pl_bolts.datamodules import ExperienceSourceDataset
-from pl_bolts.datamodules.experience_source import Experience
-from pl_bolts.models.rl.common.agents import PolicyAgent
-from pl_bolts.models.rl.common.networks import MLP
-from pl_bolts.utils import _GYM_AVAILABLE
-from pl_bolts.utils.stability import under_review
-from pl_bolts.utils.warnings import warn_missing_pkg
-
-if _GYM_AVAILABLE:
-    import gym
-else:  # pragma: no cover
-    warn_missing_pkg("gym")
+try:
+    import gymnasium as gym
+except ModuleNotFoundError:
+    _GYM_AVAILABLE = False
+else:
+    _GYM_AVAILABLE = True
 
 
-@under_review()
-class Reinforce(LightningModule):
+class Reinforce(pl.LightningModule):
     r"""PyTorch Lightning implementation of REINFORCE_.
 
     Paper authors: Richard S. Sutton, David McAllester, Satinder Singh, Yishay Mansour
@@ -60,7 +57,7 @@ class Reinforce(LightningModule):
         env: str,
         gamma: float = 0.99,
         lr: float = 0.01,
-        batch_size: int = 8,
+        batch_size: int = 32,
         n_steps: int = 10,
         avg_reward_len: int = 100,
         entropy_beta: float = 0.01,
@@ -95,13 +92,21 @@ class Reinforce(LightningModule):
         self.gamma = gamma
         self.n_steps = n_steps
         self.num_batch_episodes = num_batch_episodes
+        self.steps_per_epoch = epoch_len
 
         self.save_hyperparameters()
 
         # Model components
-        self.env = gym.make(env)
-        self.net = MLP(self.env.observation_space.shape, self.env.action_space.n)
-        self.agent = PolicyAgent(self.net)
+        if isinstance(env, str):
+            self.env = gym.make(env)
+        else:
+            self.env = env
+
+        # initialize actor network
+        self.actor_net = ActorCategorical(
+            create_mlp(self.env.observation_space.shape, self.env.action_space.n)
+        )
+        self.agent = ActorAgent(self.actor_net)
 
         # Tracking metrics
         self.total_steps = 0
@@ -114,24 +119,12 @@ class Reinforce(LightningModule):
 
         self.batch_states = []
         self.batch_actions = []
-        self.batch_qvals = []
+        self.batch_reward_to_go = []
         self.cur_rewards = []
 
-        self.state = self.env.reset()
+        self.state = torch.FloatTensor(self.env.reset()[0])
 
-    def forward(self, x: Tensor) -> Tensor:
-        """Passes in a state x through the network and gets the q_values of each action as an output.
-
-        Args:
-            x: environment state
-
-        Returns:
-            q values
-        """
-        output = self.net(x)
-        return output
-
-    def calc_qvals(self, rewards: List[float]) -> List[float]:
+    def calc_reward_to_go(self, rewards: List[float]) -> List[float]:
         """Calculate the discounted rewards of all rewards in list.
 
         Args:
@@ -151,20 +144,6 @@ class Reinforce(LightningModule):
 
         return list(reversed(cumul_reward))
 
-    def discount_rewards(self, experiences: Tuple[Experience]) -> float:
-        """Calculates the discounted reward over N experiences.
-
-        Args:
-            experiences: Tuple of Experience
-
-        Returns:
-            total discounted reward
-        """
-        total_reward = 0.0
-        for exp in reversed(experiences):
-            total_reward = (self.gamma * total_reward) + exp.reward
-        return total_reward
-
     def train_batch(
         self,
     ) -> Tuple[List[Tensor], List[Tensor], List[Tensor]]:
@@ -173,22 +152,27 @@ class Reinforce(LightningModule):
         Yield:
             yields a tuple of Lists containing tensors for states, actions and rewards of the batch.
         """
-
+        episode_step = 0
         while True:
 
-            action = self.agent(self.state, self.device)
+            _, action, _ = self.agent(self.state, self.device)
 
-            next_state, reward, done, _ = self.env.step(action[0])
+            next_state, reward, done, _, _ = self.env.step(action.cpu().numpy())
 
             self.batch_states.append(self.state)
-            self.batch_actions.append(action[0])
+            self.batch_actions.append(action)
             self.cur_rewards.append(reward)
 
-            self.state = next_state
+            self.state = torch.FloatTensor(next_state)
             self.total_steps += 1
+            episode_step += 1
+            
+            epoch_end = episode_step == (self.steps_per_epoch - 1)
+            
 
             if done:
-                self.batch_qvals.extend(self.calc_qvals(self.cur_rewards))
+                # add rewards among all steps in an finish epoch
+                self.batch_reward_to_go.extend(self.calc_reward_to_go(self.cur_rewards))
                 self.batch_episodes += 1
                 self.done_episodes += 1
                 self.total_rewards.append(sum(self.cur_rewards))
@@ -196,30 +180,40 @@ class Reinforce(LightningModule):
                     np.mean(self.total_rewards[-self.avg_reward_len :])
                 )
                 self.cur_rewards = []
-                self.state = self.env.reset()
-
+                self.state = torch.FloatTensor(self.env.reset()[0])
+            
+            # if epoch_end and not done:
+            #     # if no getting final rewards, clear all steps so far and reset
+            #     self.batch_states.clear()
+            #     self.batch_actions.clear()
+            #     self.cur_rewards.clear()
+            #     self.batch_reward_to_go.clear()
+            #     episode_step = 0
+            #     self.state = torch.FloatTensor(self.env.reset()[0])
+           
+            
             if self.batch_episodes >= self.num_batch_episodes:
-                for state, action, qval in zip(
-                    self.batch_states, self.batch_actions, self.batch_qvals
+                for state, action, reward_to_go in zip(
+                    self.batch_states, self.batch_actions, self.batch_reward_to_go
                 ):
-                    yield state, action, qval
+                    yield state, action, reward_to_go
 
                 self.batch_episodes = 0
 
                 self.batch_states.clear()
                 self.batch_actions.clear()
-                self.batch_qvals.clear()
+                self.batch_reward_to_go.clear()
 
             # Simulates epochs
             if self.total_steps % self.batches_per_epoch == 0:
                 break
 
-    def loss(self, states, actions, scaled_rewards) -> Tensor:
-        logits = self.net(states)
+    def loss(self, states, actions, rewards_to_go) -> Tensor:
 
-        # policy loss
-        log_prob = log_softmax(logits, dim=1)
-        log_prob_actions = scaled_rewards * log_prob[range(len(log_prob)), actions]
+        pi, _  = self.actor_net.forward(states)
+        log_prob = self.actor_net.get_log_prob(pi, actions)
+
+        log_prob_actions = rewards_to_go * log_prob
         loss = -log_prob_actions.mean()
 
         return loss
@@ -235,29 +229,31 @@ class Reinforce(LightningModule):
         Returns:
             Training loss and log metrics
         """
-        states, actions, scaled_rewards = batch
+        states, actions, rewards_to_go = batch
 
-        loss = self.loss(states, actions, scaled_rewards)
+        loss = self.loss(states, actions, rewards_to_go)
 
-        log = {
+        log_dict = {
             "episodes": self.done_episodes,
             "reward": self.total_rewards[-1],
             "avg_reward": self.avg_rewards,
+            "loss": loss,
         }
 
-        return OrderedDict(
-            {
-                "loss": loss,
-                "avg_reward": self.avg_rewards,
-                "log": log,
-                "progress_bar": log,
-            }
+        self.log_dict(
+            log_dict,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
         )
+
+        return loss
 
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
-        optimizer = optim.Adam(self.net.parameters(), lr=self.lr)
-        return [optimizer]
+        optimizer = optim.Adam(self.actor_net.parameters(), lr=self.lr)
+        return optimizer
 
     def _dataloader(self) -> DataLoader:
         """Initialize the Replay Buffer dataset used for retrieving experiences."""
@@ -268,10 +264,6 @@ class Reinforce(LightningModule):
     def train_dataloader(self) -> DataLoader:
         """Get train loader."""
         return self._dataloader()
-
-    def get_device(self, batch) -> str:
-        """Retrieve device currently being used by minibatch."""
-        return batch[0][0][0].device.index if self.on_gpu else "cpu"
 
     @staticmethod
     def add_model_specific_args(arg_parser) -> argparse.ArgumentParser:
@@ -321,7 +313,6 @@ class Reinforce(LightningModule):
         return arg_parser
 
 
-@under_review()
 def cli_main():
     parser = argparse.ArgumentParser(add_help=False)
 
@@ -347,4 +338,29 @@ def cli_main():
 
 
 if __name__ == "__main__":
-    cli_main()
+    import networks
+    import data_utils.data as data
+    from pytorch_lightning import Trainer
+    from pytorch_lightning.loggers.wandb import WandbLogger
+    from envs.stablizer import StablizerOneD
+    project_name = "lightning_RL"
+    env_name = "StablizerOneD"
+
+    env = StablizerOneD(end_step=float('inf'))
+    # wandb_logger = WandbLogger(
+    #     project=project_name,  # group runs in "MNIST" project
+    #     log_model=False,
+    #     save_dir="experiments",
+    #     tags=[env_name, "Reinforce"],
+    # )
+
+    model = Reinforce(env)
+    # pl trainer
+    trainer = Trainer(
+        max_epochs=10,
+        accelerator="auto",
+        gpus=1,
+        # logger=wandb_logger
+    )
+    # fit
+    res = trainer.fit(model)
